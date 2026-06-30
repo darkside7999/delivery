@@ -118,7 +118,10 @@ Siguientes pasos:
 
   3) Recarga Hyprland (SUPER+ESC o 'hyprctl reload') y Waybar.
 
-  4) Pulsa SUPER+D, habla, pulsa otra vez. El texto corregido se escribirá
+  4) Comprueba que todo está en orden:
+       voxfix doctor
+
+  5) Pulsa SUPER+D, habla, pulsa otra vez. El texto corregido se escribirá
      en la ventana activa y se copiará al portapapeles.
 
 Ajusta el backend de la IA en: $CONFIG_DIR/config

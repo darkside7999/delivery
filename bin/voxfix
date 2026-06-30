@@ -156,8 +156,22 @@ stop_recorder_process() {
 # ---------------------------------------------------------------------------
 # Transcripción (Whisper.cpp)
 # ---------------------------------------------------------------------------
+# Resuelve el binario de Whisper: respeta WHISPER_BIN y prueba nombres comunes
+# (el paquete del AUR puede llamarlo whisper-cli, whisper-cpp o main).
+resolve_whisper() {
+    local c
+    for c in "$WHISPER_BIN" whisper-cli whisper-cpp main; do
+        [ -n "$c" ] || continue
+        if command -v "$c" >/dev/null 2>&1; then
+            printf '%s' "$c"; return 0
+        fi
+    done
+    return 1
+}
+
 transcribe() {
-    command -v "$WHISPER_BIN" >/dev/null 2>&1 || die "no se encontró '$WHISPER_BIN' (instala whisper.cpp)"
+    local wbin
+    wbin=$(resolve_whisper) || die "no se encontró whisper-cli (instala whisper.cpp)"
     [ -f "$WHISPER_MODEL" ] || die "modelo no encontrado: $WHISPER_MODEL (ejecuta install.sh)"
 
     local lang_args=()
@@ -168,7 +182,7 @@ transcribe() {
     fi
 
     # --no-prints silencia el progreso; --output-txt escribe REC_WAV.txt
-    "$WHISPER_BIN" \
+    "$wbin" \
         --model "$WHISPER_MODEL" \
         --threads "$WHISPER_THREADS" \
         "${lang_args[@]}" \
@@ -345,6 +359,68 @@ toggle() {
 }
 
 # ---------------------------------------------------------------------------
+# Diagnóstico
+# ---------------------------------------------------------------------------
+doctor() {
+    local ok=0 bad=0
+    _ok()  { printf '  \033[1;32m✓\033[0m %s\n' "$1"; ok=$((ok+1)); }
+    _bad() { printf '  \033[1;31m✗\033[0m %s\n' "$1"; printf '      → %s\n' "$2"; bad=$((bad+1)); }
+
+    printf '\033[1mvoxfix doctor\033[0m\n\n'
+
+    # --- Transcripción ---
+    printf 'Transcripción (Whisper):\n'
+    local wbin
+    if wbin=$(resolve_whisper); then _ok "whisper encontrado: $wbin"
+    else _bad "whisper-cli no encontrado" "yay -S whisper.cpp   (o whisper.cpp-vulkan)"; fi
+    if [ -f "$WHISPER_MODEL" ]; then _ok "modelo: $WHISPER_MODEL"
+    else _bad "modelo ausente: $WHISPER_MODEL" "ejecuta ./install.sh"; fi
+
+    # --- Audio ---
+    printf '\nAudio:\n'
+    if command -v pw-record >/dev/null 2>&1; then _ok "pw-record (PipeWire)"
+    elif command -v ffmpeg >/dev/null 2>&1; then _ok "ffmpeg (fallback)"
+    else _bad "sin grabador de audio" "sudo pacman -S pipewire   (o ffmpeg)"; fi
+
+    # --- Salida ---
+    printf '\nSalida:\n'
+    if command -v wtype >/dev/null 2>&1; then _ok "wtype (escribir en ventana)"
+    elif command -v ydotool >/dev/null 2>&1; then _ok "ydotool (fallback)"
+    else _bad "sin autoescritura" "sudo pacman -S wtype"; fi
+    command -v wl-copy >/dev/null 2>&1 && _ok "wl-copy (portapapeles)" \
+        || _bad "wl-copy ausente" "sudo pacman -S wl-clipboard"
+
+    # --- Utilidades ---
+    printf '\nUtilidades:\n'
+    command -v jq >/dev/null 2>&1 && _ok "jq" || _bad "jq ausente" "sudo pacman -S jq"
+    command -v curl >/dev/null 2>&1 && _ok "curl" || _bad "curl ausente" "sudo pacman -S curl"
+    command -v notify-send >/dev/null 2>&1 && _ok "notify-send" \
+        || _bad "notify-send ausente" "sudo pacman -S libnotify"
+
+    # --- IA de corrección ---
+    printf '\nIA de corrección (BACKEND=%s):\n' "$BACKEND"
+    case "$BACKEND" in
+        ollama)
+            if command -v curl >/dev/null 2>&1 && \
+               curl -fsS --max-time 3 "${OLLAMA_URL%/api/generate}/api/tags" >/dev/null 2>&1; then
+                _ok "Ollama respondiendo en ${OLLAMA_URL%/api/generate}"
+                if curl -fsS --max-time 3 "${OLLAMA_URL%/api/generate}/api/tags" 2>/dev/null \
+                     | grep -q "${OLLAMA_MODEL%%:*}"; then _ok "modelo $OLLAMA_MODEL disponible"
+                else _bad "modelo $OLLAMA_MODEL no descargado" "ollama pull $OLLAMA_MODEL"; fi
+            else _bad "Ollama no responde" "systemctl enable --now ollama"; fi ;;
+        claude)
+            [ -n "${ANTHROPIC_API_KEY:-}" ] && _ok "ANTHROPIC_API_KEY presente" \
+                || _bad "falta ANTHROPIC_API_KEY" 'export ANTHROPIC_API_KEY="sk-ant-..."' ;;
+        none) _ok "sin corrección (texto crudo de Whisper)" ;;
+        *) _bad "BACKEND inválido: $BACKEND" 'usa "ollama", "claude" o "none"' ;;
+    esac
+
+    printf '\n\033[1mResumen:\033[0m %d OK, %d con problemas.\n' "$ok" "$bad"
+    [ "$bad" -eq 0 ] && printf 'Todo listo. Pulsa tu atajo y dicta. 🎙️\n'
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 case "${1:-toggle}" in
@@ -353,17 +429,19 @@ case "${1:-toggle}" in
     stop)    process ;;
     cancel)  cancel_recording ;;
     status)  get_state; echo ;;
+    doctor)  doctor ;;
     *)
         cat >&2 <<EOF
 voxfix — dictado por voz con corrección por IA
 
-Uso: voxfix {toggle|start|stop|cancel|status}
+Uso: voxfix {toggle|start|stop|cancel|status|doctor}
 
   toggle   Inicia/para la grabación (recomendado para el atajo)
   start    Inicia la grabación
   stop     Para y transcribe
   cancel   Aborta sin transcribir
   status   Imprime el estado (idle|recording|processing)
+  doctor   Comprueba dependencias y configuración
 EOF
         exit 1 ;;
 esac

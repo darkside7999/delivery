@@ -43,6 +43,15 @@ El instalador:
 
 > Asegúrate de tener `~/.local/bin` en tu `PATH`.
 
+Tras instalar, **comprueba que todo está correcto** con:
+
+```bash
+voxfix doctor
+```
+
+Imprime ✓/✗ por cada dependencia (whisper + modelo, audio, salida, IA) con la pista de
+instalación cuando algo falte.
+
 ### Activar el atajo de Hyprland
 
 Añade a `~/.config/hypr/hyprland.conf` (o copia [`config/hypr-voxfix.conf`](config/hypr-voxfix.conf) y sourcéalo):
