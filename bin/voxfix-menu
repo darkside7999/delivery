@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+#
+# voxfix-menu — Panel de control minimalista de voxfix para Omarchy/Wayland.
+# Usa walker --dmenu (o fuzzel/wofi/rofi como alternativa) para cambiar la
+# configuración sin tocar ficheros a mano.
+#
+set -uo pipefail
+
+APP_NAME="voxfix"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/$APP_NAME"
+CONFIG_FILE="$CONFIG_DIR/config"
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/$APP_NAME"
+
+# Dónde buscar modelos de Whisper (.bin) ya descargados.
+WHISPER_DIRS=("$DATA_DIR/models" "$HOME/.local/share/voxtype/models")
+
+# --------------------------------------------------------------------------
+# Selector (dmenu). walker es el de Omarchy; si no, prueba otros.
+# --------------------------------------------------------------------------
+pick() {
+    local prompt="$1"
+    if   command -v walker >/dev/null 2>&1; then walker --dmenu -p "$prompt"
+    elif command -v fuzzel >/dev/null 2>&1; then fuzzel --dmenu --prompt "$prompt "
+    elif command -v wofi   >/dev/null 2>&1; then wofi --dmenu --prompt "$prompt"
+    elif command -v rofi   >/dev/null 2>&1; then rofi -dmenu -p "$prompt"
+    else gum choose; fi
+}
+
+notify() {
+    command -v notify-send >/dev/null 2>&1 && \
+        notify-send -a "$APP_NAME" -u low "voxfix" "$1" 2>/dev/null || true
+}
+
+# --------------------------------------------------------------------------
+# Leer / escribir config
+# --------------------------------------------------------------------------
+get_cfg() {  # get_cfg CLAVE VALOR_POR_DEFECTO
+    local v=""
+    [ -f "$CONFIG_FILE" ] && v=$(grep -E "^$1=" "$CONFIG_FILE" | tail -1 | cut -d= -f2- | tr -d '"' | sed 's/[[:space:]]*#.*//; s/[[:space:]]*$//')
+    printf '%s' "${v:-$2}"
+}
+
+set_cfg() {  # set_cfg CLAVE VALOR
+    mkdir -p "$CONFIG_DIR"; touch "$CONFIG_FILE"
+    if grep -qE "^$1=" "$CONFIG_FILE"; then
+        sed -i "s|^$1=.*|$1=\"$2\"|" "$CONFIG_FILE"
+    else
+        printf '%s="%s"\n' "$1" "$2" >>"$CONFIG_FILE"
+    fi
+    notify "$1 → $2"
+}
+
+# Lista de modelos Whisper disponibles (nombre legible -> ruta), en variables paralelas.
+whisper_models() {  # imprime "nombre|ruta" por línea
+    local d f
+    for d in "${WHISPER_DIRS[@]}"; do
+        [ -d "$d" ] || continue
+        for f in "$d"/ggml-*.bin; do
+            [ -e "$f" ] || continue
+            printf '%s|%s\n' "$(basename "$f" .bin | sed 's/^ggml-//')" "$f"
+        done
+    done | sort -u
+}
+
+# --------------------------------------------------------------------------
+# Submenús
+# --------------------------------------------------------------------------
+choose_backend() {
+    local cur sel; cur=$(get_cfg BACKEND ollama)
+    sel=$(printf 'ollama (local, rápido)\nclaude-code (CLI, sin API key)\nnone (sin corrección)' | pick "Backend [$cur]")
+    case "$sel" in
+        ollama*) set_cfg BACKEND ollama ;;
+        claude-code*) set_cfg BACKEND claude-code ;;
+        none*) set_cfg BACKEND none ;;
+    esac
+}
+
+choose_ai_model() {
+    local cur sel; cur=$(get_cfg OLLAMA_MODEL "qwen2.5:7b")
+    sel=$(ollama list 2>/dev/null | awk 'NR>1{print $1}' | sort | pick "Modelo IA [$cur]")
+    [ -n "$sel" ] && set_cfg OLLAMA_MODEL "$sel"
+}
+
+choose_whisper() {
+    local cur sel name path; cur=$(basename "$(get_cfg WHISPER_MODEL '?')" .bin | sed 's/^ggml-//')
+    sel=$(whisper_models | cut -d'|' -f1 | pick "Whisper [$cur]")
+    [ -n "$sel" ] || return 0
+    path=$(whisper_models | grep -F "$sel|" | head -1 | cut -d'|' -f2)
+    [ -n "$path" ] && set_cfg WHISPER_MODEL "$path"
+}
+
+choose_lang() {
+    local cur sel; cur=$(get_cfg WHISPER_LANG es)
+    sel=$(printf 'es (español)\nauto (detectar)\nen (inglés)' | pick "Idioma [$cur]")
+    case "$sel" in es*) set_cfg WHISPER_LANG es ;; auto*) set_cfg WHISPER_LANG auto ;; en*) set_cfg WHISPER_LANG en ;; esac
+}
+
+choose_output() {
+    local cur sel; cur=$(get_cfg OUTPUT_MODE both)
+    sel=$(printf 'both (escribe + portapapeles)\ntype (solo escribe)\nclipboard (solo portapapeles)' | pick "Salida [$cur]")
+    case "$sel" in both*) set_cfg OUTPUT_MODE both ;; type*) set_cfg OUTPUT_MODE type ;; clipboard*) set_cfg OUTPUT_MODE clipboard ;; esac
+}
+
+show_history() {
+    local h="$DATA_DIR/history.txt"
+    [ -f "$h" ] && tac "$h" | pick "Historial (Enter copia)" | sed 's/^[0-9-]* [0-9:]*\t//' | { read -r line; [ -n "$line" ] && printf '%s' "$line" | wl-copy 2>/dev/null && notify "Copiado al portapapeles"; } \
+        || notify "Historial vacío"
+}
+
+# Vocabulario personalizado: añadir / ver / editar las palabras propias.
+manage_vocab() {
+    local vocab="$CONFIG_DIR/vocab.txt" sel nuevo
+    sel=$(printf '%s\n' \
+        "➕  Añadir palabra o regla" \
+        "📄  Ver vocabulario" \
+        "✏  Editar fichero" | pick "Mis palabras")
+    case "$sel" in
+        *Añadir*)
+            nuevo=$(printf '' | pick "Palabra propia  ·  o 'lo que se oye = correcto'")
+            [ -n "$nuevo" ] && { voxfix vocab add "$nuevo" >/dev/null; notify "Añadido: $nuevo"; } ;;
+        *Ver*)
+            [ -s "$vocab" ] && grep -vE '^\s*#|^\s*$' "$vocab" | pick "Vocabulario" >/dev/null || notify "Vocabulario vacío" ;;
+        *Editar*)
+            local term="${TERMINAL:-}"; [ -z "$term" ] && for t in ghostty alacritty kitty foot wezterm; do command -v "$t" >/dev/null && { term="$t"; break; }; done
+            mkdir -p "$CONFIG_DIR"; touch "$vocab"
+            [ -n "$term" ] && setsid "$term" -e "${EDITOR:-nano}" "$vocab" >/dev/null 2>&1 & ;;
+    esac
+}
+
+# --------------------------------------------------------------------------
+# Menú principal (bucle: aplica un cambio y vuelve; ESC para salir)
+# --------------------------------------------------------------------------
+main_menu() {
+    while true; do
+        local b ai wh lang out choice
+        b=$(get_cfg BACKEND ollama); ai=$(get_cfg OLLAMA_MODEL "qwen2.5:7b")
+        wh=$(basename "$(get_cfg WHISPER_MODEL '?')" .bin | sed 's/^ggml-//')
+        lang=$(get_cfg WHISPER_LANG es); out=$(get_cfg OUTPUT_MODE both)
+
+        choice=$(printf '%s\n' \
+            "🎙  Dictar / parar" \
+            "🤖  Backend     ›  $b" \
+            "🧠  Modelo IA   ›  $ai" \
+            "✍  Whisper     ›  $wh" \
+            "🌍  Idioma      ›  $lang" \
+            "📤  Salida      ›  $out" \
+            "📖  Mis palabras" \
+            "📋  Historial" \
+            "🔁  Reiniciar Waybar" | pick "voxfix")
+
+        case "$choice" in
+            *Dictar*)   voxfix toggle; return 0 ;;
+            *Backend*)  choose_backend ;;
+            *"Modelo IA"*) choose_ai_model ;;
+            *Whisper*)  choose_whisper ;;
+            *Idioma*)   choose_lang ;;
+            *Salida*)   choose_output ;;
+            *"Mis palabras"*) manage_vocab ;;
+            *Historial*) show_history ;;
+            *Waybar*)   pkill -SIGUSR2 waybar 2>/dev/null; notify "Waybar recargada" ;;
+            *) return 0 ;;   # ESC o vacío
+        esac
+    done
+}
+
+main_menu

@@ -1,0 +1,16 @@
+# ~/.config/voxfix/vocab.txt — vocabulario personalizado de voxfix
+#
+# Copia este ejemplo a ~/.config/voxfix/vocab.txt y pon tus palabras.
+# Una entrada por línea. Las líneas que empiezan por # son comentarios.
+# (También puedes gestionarlo con: voxfix vocab add "..."  o el menú → Mis palabras.)
+
+# 1) NOMBRES / TÉRMINOS PROPIOS (una palabra o frase por línea)
+#    Mejoran cómo Whisper te oye y el corrector los respeta.
+Omarchy
+Hyprland
+voxfix
+
+# 2) REGLAS DE REEMPLAZO  ->  "lo que se oye = lo correcto"  (sin distinguir mayúsculas)
+#    Arreglan de forma fija las palabras que Whisper transcribe mal.
+voz fix = voxfix
+omar qui = Omarchy

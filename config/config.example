@@ -6,17 +6,23 @@
 # ---------------------------------------------------------------------------
 # IA de corrección
 # ---------------------------------------------------------------------------
-# "ollama" = local y offline (recomendado, privado)
-# "claude" = nube (necesita ANTHROPIC_API_KEY en el entorno)
-# "none"   = sin corrección (solo Whisper en crudo)
+# "ollama"      = local y offline (recomendado, rápido y privado)
+# "claude-code" = usa el CLI 'claude' ya autenticado, SIN API key
+# "claude"      = API de Anthropic (necesita ANTHROPIC_API_KEY en el entorno)
+# "none"        = sin corrección (solo Whisper en crudo)
 BACKEND="ollama"
 
 # --- Ollama (backend local) ---
 OLLAMA_URL="http://localhost:11434/api/generate"
-# Modelos diminutos recomendados: qwen2.5:0.5b  (≈400 MB) o llama3.2:1b
-OLLAMA_MODEL="qwen2.5:0.5b"
+# Con GPU, qwen2.5:7b es muy fiel y casi instantáneo.
+# Más ligeros (CPU o GPU modesta): qwen2.5:3b, qwen2.5:1.5b, qwen2.5:0.5b
+OLLAMA_MODEL="qwen2.5:7b"
 
-# --- Claude (backend nube) ---
+# --- Claude Code (backend "claude-code") ---
+CLAUDE_CODE_BIN="claude"
+CLAUDE_CODE_MODEL="haiku"        # alias rápido, o un id completo
+
+# --- Claude API (backend "claude") ---
 # Exporta tu clave, por ejemplo en ~/.bashrc:  export ANTHROPIC_API_KEY="sk-ant-..."
 CLAUDE_MODEL="claude-haiku-4-5-20251001"
 
@@ -24,9 +30,11 @@ CLAUDE_MODEL="claude-haiku-4-5-20251001"
 # Whisper (transcripción local)
 # ---------------------------------------------------------------------------
 WHISPER_BIN="whisper-cli"
+# ggml-base = rápido pero impreciso. Para más precisión: ggml-small o
+# ggml-large-v3-turbo (excelente y rápido si tu whisper.cpp usa GPU).
 WHISPER_MODEL="$HOME/.local/share/voxfix/models/ggml-base.bin"
-# "auto" detecta el idioma automáticamente; o fija uno: "es", "en", "fr"...
-WHISPER_LANG="auto"
+# "auto" detecta el idioma; con frases cortas falla, mejor fíjalo: "es", "en"...
+WHISPER_LANG="es"
 WHISPER_THREADS="4"
 
 # ---------------------------------------------------------------------------
