@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+#
+# voxfix-waybar — Emite el estado de voxfix como JSON para un módulo "custom"
+# de Waybar. Refresca al instante cuando voxfix envía la señal RTMIN+8.
+#
+#   { "text": "...", "tooltip": "...", "class": "idle|recording|processing" }
+#
+set -uo pipefail
+
+APP_NAME="voxfix"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/$APP_NAME"
+STATE_FILE="$CACHE_DIR/state"
+
+state="idle"
+[ -f "$STATE_FILE" ] && state=$(cat "$STATE_FILE" 2>/dev/null || echo idle)
+
+case "$state" in
+    recording)  text="🔴"; tip="Grabando — pulsa el atajo para transcribir" ;;
+    processing) text="⏳"; tip="Transcribiendo y corrigiendo…" ;;
+    *)          state="idle"; text="🎙️"; tip="voxfix listo — pulsa para dictar" ;;
+esac
+
+printf '{"text":"%s","tooltip":"%s","class":"%s","alt":"%s"}\n' \
+    "$text" "$tip" "$state" "$state"

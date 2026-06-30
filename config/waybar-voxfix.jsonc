@@ -1,0 +1,34 @@
+// voxfix — módulo "custom" para Waybar
+//
+// 1) Añade "custom/voxfix" a tus "modules-right" (o left/center) en
+//    ~/.config/waybar/config.jsonc
+// 2) Pega el objeto de abajo dentro del config de Waybar.
+// 3) Pega las reglas CSS (más abajo) en ~/.config/waybar/style.css
+// 4) Recarga Waybar.
+
+"custom/voxfix": {
+    "exec": "voxfix-waybar",
+    "return-type": "json",
+    "interval": "once",
+    "signal": 8,            // voxfix envía RTMIN+8 al cambiar de estado
+    "on-click": "voxfix toggle",
+    "on-click-right": "voxfix cancel",
+    "tooltip": true
+}
+
+/* --- CSS sugerido para ~/.config/waybar/style.css ---
+
+#custom-voxfix {
+    padding: 0 10px;
+}
+#custom-voxfix.recording {
+    color: #ff5555;
+}
+#custom-voxfix.processing {
+    color: #f1fa8c;
+}
+#custom-voxfix.idle {
+    color: #bd93f9;
+}
+
+*/

@@ -1,0 +1,369 @@
+#!/usr/bin/env bash
+#
+# voxfix — Dictado por voz con corrección por IA para Omarchy (Hyprland/Wayland)
+#
+#   Whisper.cpp transcribe tu voz → una IA ultra ligera (Ollama local o Claude
+#   Haiku) reformatea/corrige el texto → se escribe en la ventana activa y se
+#   copia al portapapeles.
+#
+# Uso:
+#   voxfix toggle    Inicia la grabación; si ya está grabando, para y transcribe
+#   voxfix start     Inicia la grabación
+#   voxfix stop      Para la grabación y procesa
+#   voxfix cancel    Aborta la grabación sin transcribir
+#   voxfix status    Imprime el estado actual (idle|recording|processing)
+#
+set -uo pipefail
+
+# ---------------------------------------------------------------------------
+# Rutas y estado
+# ---------------------------------------------------------------------------
+APP_NAME="voxfix"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/$APP_NAME"
+CONFIG_FILE="$CONFIG_DIR/config"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/$APP_NAME"
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/$APP_NAME"
+
+REC_WAV="$CACHE_DIR/rec.wav"
+REC_PID="$CACHE_DIR/rec.pid"
+STATE_FILE="$CACHE_DIR/state"
+LOG_FILE="$CACHE_DIR/voxfix.log"
+
+mkdir -p "$CACHE_DIR"
+
+# ---------------------------------------------------------------------------
+# Configuración por defecto (se puede sobrescribir en ~/.config/voxfix/config)
+# ---------------------------------------------------------------------------
+# Backend de la IA de corrección: "ollama" (local, offline) | "claude" (nube) | "none"
+BACKEND="ollama"
+
+# Whisper
+WHISPER_BIN="whisper-cli"
+WHISPER_MODEL="$DATA_DIR/models/ggml-base.bin"
+WHISPER_LANG="auto"          # "auto" detecta el idioma; o "es", "en", ...
+WHISPER_THREADS="4"
+
+# Ollama (backend local)
+OLLAMA_URL="http://localhost:11434/api/generate"
+OLLAMA_MODEL="qwen2.5:0.5b"
+
+# Claude (backend nube). La API key se lee de ANTHROPIC_API_KEY del entorno.
+CLAUDE_URL="https://api.anthropic.com/v1/messages"
+CLAUDE_MODEL="claude-haiku-4-5-20251001"
+CLAUDE_VERSION="2023-06-01"
+
+# Audio
+AUDIO_TARGET=""              # objetivo concreto de pw-record (vacío = por defecto)
+
+# Salida: "type" | "clipboard" | "both"
+OUTPUT_MODE="both"
+
+# Notificaciones de escritorio
+NOTIFY="true"
+
+# Instrucción para la IA de corrección
+REFORMAT_PROMPT="Eres un corrector de transcripciones de voz. Recibirás un texto \
+transcrito automáticamente que puede tener errores de puntuación, mayúsculas, \
+muletillas o frases incoherentes. Devuelve EXCLUSIVAMENTE el texto corregido: \
+arregla la puntuación y las mayúsculas, elimina muletillas y repeticiones, y \
+reescribe lo que no tenga sentido para que sea claro y coherente. Conserva el \
+significado y el MISMO idioma del original. No añadas comentarios, explicaciones \
+ni comillas. Si el texto ya está bien, devuélvelo igual."
+
+# Cargar config del usuario si existe
+# shellcheck source=/dev/null
+[ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
+
+# ---------------------------------------------------------------------------
+# Utilidades
+# ---------------------------------------------------------------------------
+log() { printf '%s %s\n' "[$(date '+%H:%M:%S')]" "$*" >>"$LOG_FILE"; }
+
+emit_state() {
+    printf '%s' "$1" >"$STATE_FILE"
+    # Refresca el módulo de Waybar al instante (señal RTMIN+8 por defecto).
+    pkill -RTMIN+8 waybar 2>/dev/null || true
+}
+
+get_state() {
+    [ -f "$STATE_FILE" ] && cat "$STATE_FILE" || printf 'idle'
+}
+
+notify() {
+    [ "$NOTIFY" = "true" ] || return 0
+    command -v notify-send >/dev/null 2>&1 || return 0
+    # $1 = urgencia, $2 = título, $3 = cuerpo
+    notify-send -a "$APP_NAME" -u "$1" -h "string:x-canonical-private-synchronous:$APP_NAME" \
+        "$2" "${3:-}" 2>/dev/null || true
+}
+
+die() {
+    log "ERROR: $*"
+    notify critical "voxfix" "Error: $*"
+    emit_state idle
+    exit 1
+}
+
+# ---------------------------------------------------------------------------
+# Grabación
+# ---------------------------------------------------------------------------
+recorder_running() {
+    [ -f "$REC_PID" ] && kill -0 "$(cat "$REC_PID")" 2>/dev/null
+}
+
+start_recording() {
+    if recorder_running; then
+        log "start: ya estaba grabando"
+        return 0
+    fi
+    rm -f "$REC_WAV"
+
+    local args
+    if command -v pw-record >/dev/null 2>&1; then
+        args=(pw-record --rate 16000 --channels 1 --format s16)
+        [ -n "$AUDIO_TARGET" ] && args+=(--target "$AUDIO_TARGET")
+        args+=("$REC_WAV")
+    elif command -v ffmpeg >/dev/null 2>&1; then
+        args=(ffmpeg -nostdin -loglevel error -f pulse -i "${AUDIO_TARGET:-default}" \
+              -ar 16000 -ac 1 -y "$REC_WAV")
+    else
+        die "no se encontró pw-record ni ffmpeg para grabar audio"
+    fi
+
+    "${args[@]}" >>"$LOG_FILE" 2>&1 &
+    echo $! >"$REC_PID"
+    emit_state recording
+    notify normal "🎙️  Grabando…" "Pulsa de nuevo el atajo para transcribir."
+    log "grabando (pid $!) con: ${args[0]}"
+}
+
+# Detiene el grabador y espera a que el WAV quede cerrado correctamente.
+stop_recorder_process() {
+    recorder_running || return 1
+    local pid
+    pid=$(cat "$REC_PID")
+    kill -INT "$pid" 2>/dev/null || kill "$pid" 2>/dev/null
+    # Espera (hasta ~3s) a que el proceso termine de volcar el fichero.
+    for _ in $(seq 1 30); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
+    rm -f "$REC_PID"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Transcripción (Whisper.cpp)
+# ---------------------------------------------------------------------------
+transcribe() {
+    command -v "$WHISPER_BIN" >/dev/null 2>&1 || die "no se encontró '$WHISPER_BIN' (instala whisper.cpp)"
+    [ -f "$WHISPER_MODEL" ] || die "modelo no encontrado: $WHISPER_MODEL (ejecuta install.sh)"
+
+    local lang_args=()
+    if [ "$WHISPER_LANG" = "auto" ]; then
+        lang_args=(--language auto)
+    else
+        lang_args=(--language "$WHISPER_LANG")
+    fi
+
+    # --no-prints silencia el progreso; --output-txt escribe REC_WAV.txt
+    "$WHISPER_BIN" \
+        --model "$WHISPER_MODEL" \
+        --threads "$WHISPER_THREADS" \
+        "${lang_args[@]}" \
+        --no-timestamps \
+        --output-txt \
+        --file "$REC_WAV" >>"$LOG_FILE" 2>&1
+
+    local txt_file="$REC_WAV.txt"
+    [ -f "$txt_file" ] || die "Whisper no produjo salida de texto"
+
+    # Normaliza espacios/saltos de línea y recorta extremos.
+    tr '\n' ' ' <"$txt_file" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//'
+    rm -f "$txt_file"
+}
+
+# ---------------------------------------------------------------------------
+# Reformateo por IA
+# ---------------------------------------------------------------------------
+# Usa jq para construir el JSON con seguridad (escapa comillas, saltos, etc.)
+reformat_ollama() {
+    local raw="$1" body resp out
+    body=$(jq -n \
+        --arg model "$OLLAMA_MODEL" \
+        --arg sys "$REFORMAT_PROMPT" \
+        --arg prompt "$raw" \
+        '{model:$model, system:$sys, prompt:$prompt, stream:false,
+          options:{temperature:0.2}}')
+
+    resp=$(curl -fsS --max-time 60 \
+        -H 'Content-Type: application/json' \
+        -d "$body" "$OLLAMA_URL" 2>>"$LOG_FILE") || return 1
+
+    out=$(printf '%s' "$resp" | jq -r '.response // empty')
+    [ -n "$out" ] || return 1
+    printf '%s' "$out"
+}
+
+reformat_claude() {
+    local raw="$1" body resp out
+    [ -n "${ANTHROPIC_API_KEY:-}" ] || { log "claude: falta ANTHROPIC_API_KEY"; return 1; }
+
+    body=$(jq -n \
+        --arg model "$CLAUDE_MODEL" \
+        --arg sys "$REFORMAT_PROMPT" \
+        --arg text "$raw" \
+        '{model:$model, max_tokens:1024, temperature:0.2, system:$sys,
+          messages:[{role:"user", content:$text}]}')
+
+    resp=$(curl -fsS --max-time 60 \
+        -H "x-api-key: $ANTHROPIC_API_KEY" \
+        -H "anthropic-version: $CLAUDE_VERSION" \
+        -H 'Content-Type: application/json' \
+        -d "$body" "$CLAUDE_URL" 2>>"$LOG_FILE") || return 1
+
+    out=$(printf '%s' "$resp" | jq -r '.content[0].text // empty')
+    [ -n "$out" ] || { log "claude: respuesta sin texto: $resp"; return 1; }
+    printf '%s' "$out"
+}
+
+# Devuelve el texto corregido; si la IA falla, devuelve el crudo (degradación elegante).
+reformat() {
+    local raw="$1" out
+    [ -n "$raw" ] || { printf ''; return 0; }
+
+    case "$BACKEND" in
+        none)
+            printf '%s' "$raw"; return 0 ;;
+        ollama)
+            command -v jq >/dev/null 2>&1 || { log "jq no disponible"; printf '%s' "$raw"; return 0; }
+            if out=$(reformat_ollama "$raw"); then
+                printf '%s' "$out"; return 0
+            fi ;;
+        claude)
+            command -v jq >/dev/null 2>&1 || { log "jq no disponible"; printf '%s' "$raw"; return 0; }
+            if out=$(reformat_claude "$raw"); then
+                printf '%s' "$out"; return 0
+            fi ;;
+        *)
+            log "BACKEND desconocido: $BACKEND" ;;
+    esac
+
+    log "reformateo falló; se usa el texto crudo"
+    notify normal "voxfix" "IA de corrección no disponible; uso el texto sin corregir."
+    printf '%s' "$raw"
+}
+
+# Limpia restos comunes que algunos modelos añaden (comillas envolventes).
+trim_text() {
+    sed -E 's/^[[:space:]]*["“]//; s/["”][[:space:]]*$//; s/^[[:space:]]+//; s/[[:space:]]+$//'
+}
+
+# ---------------------------------------------------------------------------
+# Salida
+# ---------------------------------------------------------------------------
+output_text() {
+    local text="$1"
+    [ -n "$text" ] || return 0
+
+    case "$OUTPUT_MODE" in
+        clipboard) copy_clip "$text" ;;
+        type)      type_text "$text" ;;
+        both)      copy_clip "$text"; type_text "$text" ;;
+        *)         copy_clip "$text"; type_text "$text" ;;
+    esac
+}
+
+copy_clip() {
+    command -v wl-copy >/dev/null 2>&1 || { log "wl-copy no disponible"; return 0; }
+    printf '%s' "$1" | wl-copy
+}
+
+type_text() {
+    if command -v wtype >/dev/null 2>&1; then
+        wtype "$1"
+    elif command -v ydotool >/dev/null 2>&1; then
+        ydotool type "$1"
+    else
+        log "ni wtype ni ydotool disponibles; el texto queda en el portapapeles"
+        notify normal "voxfix" "Texto copiado al portapapeles (instala wtype para autoescritura)."
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Pipeline principal
+# ---------------------------------------------------------------------------
+process() {
+    stop_recorder_process || die "no había ninguna grabación activa"
+    emit_state processing
+
+    [ -s "$REC_WAV" ] || { emit_state idle; notify normal "voxfix" "No se grabó audio."; return 0; }
+
+    notify low "✍️  Transcribiendo…" "Whisper + IA de corrección"
+
+    local raw clean
+    raw=$(transcribe)
+    raw=$(printf '%s' "$raw" | trim_text)
+
+    if [ -z "$raw" ]; then
+        emit_state idle
+        notify normal "voxfix" "No se detectó voz."
+        return 0
+    fi
+    log "crudo: $raw"
+
+    clean=$(reformat "$raw")
+    clean=$(printf '%s' "$clean" | trim_text)
+    [ -n "$clean" ] || clean="$raw"
+    log "corregido: $clean"
+
+    output_text "$clean"
+    emit_state idle
+    notify normal "✅ Listo" "$clean"
+    rm -f "$REC_WAV"
+}
+
+cancel_recording() {
+    if stop_recorder_process; then
+        rm -f "$REC_WAV"
+        emit_state idle
+        notify normal "voxfix" "Grabación cancelada."
+        log "cancelado"
+    else
+        emit_state idle
+        log "cancel: no había grabación"
+    fi
+}
+
+toggle() {
+    if recorder_running; then
+        process
+    else
+        start_recording
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+case "${1:-toggle}" in
+    toggle)  toggle ;;
+    start)   start_recording ;;
+    stop)    process ;;
+    cancel)  cancel_recording ;;
+    status)  get_state; echo ;;
+    *)
+        cat >&2 <<EOF
+voxfix — dictado por voz con corrección por IA
+
+Uso: voxfix {toggle|start|stop|cancel|status}
+
+  toggle   Inicia/para la grabación (recomendado para el atajo)
+  start    Inicia la grabación
+  stop     Para y transcribe
+  cancel   Aborta sin transcribir
+  status   Imprime el estado (idle|recording|processing)
+EOF
+        exit 1 ;;
+esac

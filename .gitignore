@@ -1,0 +1,11 @@
+# Audio temporal y caché
+*.wav
+*.wav.txt
+
+# Modelos descargados (grandes; los baja install.sh)
+*.bin
+models/
+
+# Misc
+*.log
+.DS_Store

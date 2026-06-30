@@ -1,0 +1,52 @@
+# ~/.config/voxfix/config — configuración de voxfix
+#
+# Este archivo se "sourcea" desde bash, así que usa sintaxis VARIABLE="valor".
+# Copia este ejemplo a ~/.config/voxfix/config y ajústalo a tu gusto.
+
+# ---------------------------------------------------------------------------
+# IA de corrección
+# ---------------------------------------------------------------------------
+# "ollama" = local y offline (recomendado, privado)
+# "claude" = nube (necesita ANTHROPIC_API_KEY en el entorno)
+# "none"   = sin corrección (solo Whisper en crudo)
+BACKEND="ollama"
+
+# --- Ollama (backend local) ---
+OLLAMA_URL="http://localhost:11434/api/generate"
+# Modelos diminutos recomendados: qwen2.5:0.5b  (≈400 MB) o llama3.2:1b
+OLLAMA_MODEL="qwen2.5:0.5b"
+
+# --- Claude (backend nube) ---
+# Exporta tu clave, por ejemplo en ~/.bashrc:  export ANTHROPIC_API_KEY="sk-ant-..."
+CLAUDE_MODEL="claude-haiku-4-5-20251001"
+
+# ---------------------------------------------------------------------------
+# Whisper (transcripción local)
+# ---------------------------------------------------------------------------
+WHISPER_BIN="whisper-cli"
+WHISPER_MODEL="$HOME/.local/share/voxfix/models/ggml-base.bin"
+# "auto" detecta el idioma automáticamente; o fija uno: "es", "en", "fr"...
+WHISPER_LANG="auto"
+WHISPER_THREADS="4"
+
+# ---------------------------------------------------------------------------
+# Audio
+# ---------------------------------------------------------------------------
+# Dispositivo/objetivo concreto de pw-record (vacío = entrada por defecto).
+# Lista tus fuentes con:  pw-record --list-targets
+AUDIO_TARGET=""
+
+# ---------------------------------------------------------------------------
+# Salida y notificaciones
+# ---------------------------------------------------------------------------
+# "both" = escribe en la ventana activa Y copia al portapapeles
+# "type" = solo escribe   |   "clipboard" = solo copia
+OUTPUT_MODE="both"
+
+# Notificaciones de escritorio (notify-send)
+NOTIFY="true"
+
+# ---------------------------------------------------------------------------
+# Instrucción para la IA (opcional: descomenta para personalizar)
+# ---------------------------------------------------------------------------
+# REFORMAT_PROMPT="Corrige el siguiente texto transcrito..."
