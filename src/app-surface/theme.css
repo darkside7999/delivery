@@ -1,0 +1,40 @@
+/*
+ * TEMA — Claude puede ajustar estas variables para cambiar la apariencia de
+ * toda la página sin tocar el layout. Mantén una paleta cohesionada y con buen
+ * contraste, y respeta el modo oscuro.
+ */
+:root {
+  --font: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+
+  --bg: #f6f6f4;
+  --fg: #1f1e1b;
+  --muted: #78766f;
+  --card: #ffffff;
+  --border: #e6e4dd;
+  --bubble: #f0efe9;
+
+  --accent: #2f6b4f;
+  --danger: #c0483f;
+
+  --notice-bg: #fbf3e2;
+  --notice-border: #e8d9b5;
+  --notice-fg: #7a5c1e;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #17181a;
+    --fg: #ececec;
+    --muted: #9a9a94;
+    --card: #202124;
+    --border: #33343880;
+    --bubble: #2a2b2e;
+
+    --accent: #4c9c74;
+    --danger: #e0776d;
+
+    --notice-bg: #2c2618;
+    --notice-border: #4a3f22;
+    --notice-fg: #e2c88a;
+  }
+}
